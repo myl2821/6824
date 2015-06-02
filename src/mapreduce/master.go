@@ -7,6 +7,7 @@ import "log"
 type WorkerInfo struct {
 	address string
 	// You can add definitions here.
+	busy bool
 }
 
 // Clean up all workers by sending a Shutdown RPC to each one of them Collect
@@ -41,6 +42,7 @@ func (mr *MapReduce) RunMaster() *list.List {
 					// get rid of dup regist
 					info := new(WorkerInfo)
 					info.address = worker
+					info.busy = false
 					mr.Workers[worker] = info
 					mr.idleChannel <- worker
 				}
@@ -51,20 +53,34 @@ func (mr *MapReduce) RunMaster() *list.List {
 		}
 	}()
 
-	for i := 0; i < mr.nMap; i++ {
-		worker := <-mr.idleChannel
-		go func(w string, jn int) {
-			args := &DoJobArgs{mr.file, Map, jn, mr.nReduce}
-			var reply DoJobReply
+	doJob := func (t JobType, jn int) {
+		var nOtherPhase int
+		var recver chan bool
+		switch t {
+		case Map:
+			nOtherPhase = mr.nReduce
+			recver = mr.mapChannel
+		case Reduce:
+			nOtherPhase = mr.nMap
+			recver = mr.reduceChannel
+		}
+		args := &DoJobArgs{mr.file, t, jn, nOtherPhase}
+		var reply DoJobReply
+		for {
+			w := <-mr.idleChannel
+			mr.Workers[w].busy = true
 			ok := call(w, "Worker.DoJob", args, &reply)
-			if !ok {
-				log.Fatal("Map Failed")
-				// XXX do rescue
-			} else {
-				mr.mapChannel <- true
+			if ok {
+				recver <- true
+				mr.Workers[w].busy = false
+				mr.idleChannel <- w
+				return
 			}
-			mr.idleChannel <- w
-		}(worker, i)
+		}
+	}
+
+	for i := 0; i < mr.nMap; i++ {
+		go doJob(Map, i)
 	}
 
 	for i := 0; i < mr.nMap; i++ {
@@ -72,27 +88,17 @@ func (mr *MapReduce) RunMaster() *list.List {
 	}
 
 	for i := 0; i < mr.nReduce; i++ {
-		worker := <-mr.idleChannel
-		go func(w string, jn int) {
-			args := &DoJobArgs{mr.file, Reduce, jn, mr.nMap}
-			var reply DoJobReply
-			ok := call(w, "Worker.DoJob", args, &reply)
-			if !ok {
-				log.Fatal("Reduce Failed")
-				// XXX do rescue
-			} else {
-				mr.reduceChannel <- true
-			}
-			mr.idleChannel <- w
-		}(worker, i)
+		go doJob(Reduce, i)
 	}
 
 	for i := 0; i < mr.nReduce; i++ {
 		<-mr.reduceChannel
 	}
 
-	for i := 0; i < len(mr.Workers); i++ {
-		<-mr.idleChannel
+	for _, v := range mr.Workers {
+		if !v.busy {
+			<-mr.idleChannel
+		}
 	}
 
 	mr.stopRegistChannel <- true
