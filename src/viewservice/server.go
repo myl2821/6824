@@ -18,6 +18,10 @@ type ViewServer struct {
 
 
 	// Your declarations here.
+	volunteer string // promoted to backup when needed
+	// XXX keep track of current view
+	// XXX keep track of whether the primary for the current view has acknowledged
+	// XXX detect primary or backup has failed
 }
 
 //
@@ -27,6 +31,8 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
 
+	// XXX refresh P/B state
+	// XXX send ACK
 	return nil
 }
 
@@ -37,6 +43,7 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
 
+	// Send view status
 	return nil
 }
 
@@ -49,6 +56,9 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+
+	// XXX detect failure(DeadPing, ViewNum check)
+	// XXX make periodic decisions
 }
 
 //
