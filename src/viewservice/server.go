@@ -18,10 +18,27 @@ type ViewServer struct {
 
 
 	// Your declarations here.
-	volunteer string // promoted to backup when needed
-	// XXX keep track of current view
-	// XXX keep track of whether the primary for the current view has acknowledged
-	// XXX detect primary or backup has failed
+	volunteer  string // promoted to backup when needed
+	view       View
+	newView    View
+
+	needupdate bool
+	primaryAck bool
+
+	pmiss	   int32 // missed ping of primary
+	bmiss      int32 // missed ping of backup
+}
+
+func (vs *ViewServer) updateView (Viewnum uint, primary string, backup string) {
+	if primary == backup {
+		log.Fatal("Inner error: primary equals to backup")
+	}
+	vs.needupdate = true
+	v := new(View)
+	v.Viewnum = Viewnum
+	v.Primary = primary
+	v.Backup = backup
+	vs.newView = *v
 }
 
 //
@@ -31,8 +48,36 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
 
-	// XXX refresh P/B state
-	// XXX send ACK
+	client := args.Me
+	clientVn := args.Viewnum
+	viewerVn := vs.view.Viewnum
+
+	// Primary acked current view
+	if client == vs.view.Primary && clientVn == vs.view.Viewnum {
+		vs.primaryAck = true
+	}
+
+	// new worker?
+	if clientVn == 0 {
+		if viewerVn == 0 {
+			vs.view.Viewnum = 1
+			vs.view.Primary = client
+		} else if vs.view.Backup == "" && client != vs.view.Primary && client != vs.volunteer {
+			vs.updateView(viewerVn + 1, vs.view.Primary, client)
+		} else if vs.volunteer == "" && client != vs.view.Backup && client != vs.view.Primary {
+			vs.volunteer = client
+		}
+	}
+
+	// refresh P/B state
+	// Just let it die if ViewNum is not correct
+	if vs.view.Primary == client && clientVn == vs.view.Viewnum {
+		vs.pmiss = 0
+	}
+	if vs.view.Backup == client && clientVn == vs.view.Viewnum {
+		vs.bmiss = 0
+	}
+	reply.View = vs.view
 	return nil
 }
 
@@ -42,8 +87,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
-
-	// Send view status
+	reply.View = vs.view
 	return nil
 }
 
@@ -56,9 +100,41 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+	if vs.view.Primary != "" {
+		vs.pmiss++
+		if vs.pmiss >= DeadPings {
+			if vs.view.Backup != "" {
+				if vs.volunteer != "" {
+					vs.updateView(vs.view.Viewnum+1, vs.view.Backup, vs.volunteer)
+					vs.volunteer = ""
+				} else {
+					vs.updateView(vs.view.Viewnum+1, vs.view.Backup, "")
+				}
+			}
+		}
+	}
 
-	// XXX detect failure(DeadPing, ViewNum check)
-	// XXX make periodic decisions
+	if vs.view.Backup != "" {
+		vs.bmiss++
+		if vs.bmiss >= DeadPings {
+			if vs.volunteer != "" {
+				vs.updateView(vs.view.Viewnum+1, vs.view.Primary, vs.volunteer)
+				vs.volunteer = ""
+			} else {
+				vs.updateView(vs.view.Viewnum+1, vs.view.Primary, "")
+			}
+		}
+	}
+
+	// proceed view update!
+	if vs.primaryAck && vs.needupdate {
+		vs.view = vs.newView
+		vs.primaryAck = false
+		vs.needupdate = false
+		vs.pmiss = 0
+		vs.bmiss = 0
+	}
+
 }
 
 //
@@ -87,6 +163,18 @@ func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
 	// Your vs.* initializations here.
+	view := new(View)
+	view.Viewnum = 0
+	view.Primary = ""
+	view.Backup = ""
+	vs.view = *view
+
+	vs.volunteer = ""
+	vs.pmiss = 0
+	vs.bmiss = 0
+
+	vs.primaryAck = false
+	vs.needupdate = false
 
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
