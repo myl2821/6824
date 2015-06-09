@@ -14,8 +14,12 @@ type PutAppendArgs struct {
 	Value string
 	// You'll have to add definitions here.
 
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	// Req#
+	Reqn     uint
+	// Operation
+	Op    string
+	// If this destrction is forwarded
+	Forward  bool
 }
 
 type PutAppendReply struct {
@@ -25,6 +29,11 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+
+	// Req#
+	Reqn     uint
+	// If this destrction is forwarded
+	Forward  bool
 }
 
 type GetReply struct {

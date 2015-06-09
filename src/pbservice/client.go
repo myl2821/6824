@@ -3,6 +3,7 @@ package pbservice
 import "viewservice"
 import "net/rpc"
 import "fmt"
+import "time"
 
 import "crypto/rand"
 import "math/big"
@@ -11,6 +12,8 @@ import "math/big"
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
+	reqn int64 // request number
+	primary
 }
 
 // this may come in handy.
@@ -25,6 +28,7 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
+	ck.reqn = 0
 
 	return ck
 }
@@ -64,6 +68,20 @@ func call(srv string, rpcname string,
 	return false
 }
 
+// Try to get primary from Iiewservice
+// and update cache
+func (ck *Clerk) getPrimary() string {
+	view, ok := ck.vs.Get()
+	for !ok || view.Primary == "" {
+		// XXX Handle timeout
+		// In this lab we suppose vs won't fail...
+		time.Sleep(viewservice.PingInterval)
+		view, ok = ck.vs.Get()
+	}
+	vs.primary = view.Primary
+	return view.Primary
+}
+
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -74,8 +92,23 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-
-	return "???"
+	reply := new(GetReply)
+	arg := new(GetArgs)
+	arg.Reqn = nrand()
+	arg.Key = key
+	ok := call(ck.primary, "PBServer.Get", arg, reply)
+	for !ok {
+		// primary dead?
+		// XXX Handle timeout
+		primary := ck.getPrimary()
+		time.Sleep(viewservice.PingInterval)
+		ok = call(primary, "PBServer.Get", key, reply)
+	}
+	if reply.Err != "" {
+		// XXX
+		return ""
+	}
+	return reply.Value
 }
 
 //
@@ -84,6 +117,20 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	reply := new(PutAppendReply)
+	arg := new(PutAppendArgs)
+	arg.Key = key
+	arg.Value = value
+	arg.Op = op
+	arg.Reqn = nrand()
+	ok := call(ck.primary, "PBServer.PutAppend", arg, reply)
+	for !ok {
+		// primary dead?
+		// XXX Handle timeout
+		primary := ck.getPrimary()
+		time.Sleep(viewservice.PingInterval)
+		ok = call(primary, "PBServer.PutAppend", key, reply)
+	}
 }
 
 //

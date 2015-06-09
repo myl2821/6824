@@ -13,7 +13,6 @@ import "syscall"
 import "math/rand"
 
 
-
 type PBServer struct {
 	mu         sync.Mutex
 	l          net.Listener
@@ -22,12 +21,33 @@ type PBServer struct {
 	me         string
 	vs         *viewservice.Clerk
 	// Your declarations here.
+
+	// K-V pair memcache
+	data       map[string]string
+
+	// latest View
+	view       viewservice.View
+
+	// Map client to its latest req#
+	cli2req    map[string]int
+
+	// map req# to its answer
+	req2ans    map[int]string
+
 }
 
+func (pb *PBServer) Forward(args interface{}, reply interface{}, op) {
+	// XXX Not Implement
+}
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
+
+	// XXX Reject forward when needed
+	// XXX Forward when me is primary
+	// XXX Map new answer
+	// XXX Unmap old answer
 
 	return nil
 }
@@ -37,6 +57,10 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
 	// Your code here.
 
+	// XXX Reject forward when needed
+	// XXX Forward when me is primary
+	// XXX Map new answer
+	// XXX Unmap old answer
 
 	return nil
 }
@@ -51,6 +75,11 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 func (pb *PBServer) tick() {
 
 	// Your code here.
+	// learn latest view status
+	res, ok := pb.vs.Ping()
+	if ok {
+		pb.view = res.View
+	}
 }
 
 // tell the server to shut itself down.
