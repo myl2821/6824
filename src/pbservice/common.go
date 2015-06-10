@@ -10,16 +10,17 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
+	Key    string
+	Value  string
 	// You'll have to add definitions here.
 
+	Me     string
 	// Req#
-	Reqn     uint
+	Reqn   int64
 	// Operation
-	Op    string
-	// If this destrction is forwarded
-	Forward  bool
+	Op     string
+	// Forwarded?
+	Forward bool
 }
 
 type PutAppendReply struct {
@@ -27,13 +28,12 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
+	Key     string
 	// You'll have to add definitions here.
 
+	Me     string
 	// Req#
-	Reqn     uint
-	// If this destrction is forwarded
-	Forward  bool
+	Reqn    int64
 }
 
 type GetReply struct {

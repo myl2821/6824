@@ -28,24 +28,64 @@ type PBServer struct {
 	// latest View
 	view       viewservice.View
 
+	// I am primary?
+	primary	   bool
+
 	// Map client to its latest req#
-	cli2req    map[string]int
+	cli2req    map[string]int64
 
 	// map req# to its answer
-	req2ans    map[int]string
+	req2ans    map[int64]string
 
 }
 
-func (pb *PBServer) Forward(args interface{}, reply interface{}, op) {
-	// XXX Not Implement
+// Forward instruction to backup
+func (pb *PBServer) Forward(serv string, arg *PutAppendArgs, reply *PutAppendReply) error {
+	arg.Forward = true
+	ok := call(serv, "PBServer.PutAppend", arg, reply)
+	for !ok {
+		time.Sleep(viewservice.PingInterval)
+		ok = call(serv, "PBServer.PutAppend", arg, reply)
+	}
+	if reply.Err != "" {
+		// XXX being rejected
+	}
+	return nil
 }
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
 
-	// XXX Reject forward when needed
-	// XXX Forward when me is primary
+	getAns := func(reqn int64) {
+		pb.cli2req[args.Me] = reqn
+		ans := pb.data[args.Key]
+		log.Println(args.Key)
+		pb.req2ans[reqn] = ans
+		reply.Value = ans
+	}
+
+	// Don't forward Get option
+	if pb.primary {
+		reqn, exists := pb.cli2req[args.Me]
+		if exists {
+			if args.Reqn == reqn {
+				// dup Operation
+				reply.Value = pb.req2ans[reqn]
+			} else {
+				// delete old answer
+				delete(pb.req2ans, reqn)
+				getAns(reqn)
+			}
+		} else {
+			// New Clerk
+			getAns(reqn)
+		}
+	} else {
+		log.Println("x")
+		reply.Err = "Query backup"
+	}
+
 	// XXX Map new answer
 	// XXX Unmap old answer
 
@@ -58,9 +98,37 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 	// Your code here.
 
 	// XXX Reject forward when needed
-	// XXX Forward when me is primary
-	// XXX Map new answer
-	// XXX Unmap old answer
+
+	update := func(reqn int64) {
+		pb.cli2req[args.Me] = reqn
+		switch args.Op {
+		case "Put":
+			pb.data[args.Key] = args.Value
+		case "Append":
+			pb.data[args.Key] += args.Value
+		}
+
+		pb.req2ans[reqn] = ""
+		if pb.primary && pb.view.Backup != "" {
+			pb.Forward(pb.view.Backup, args ,reply)
+		}
+	}
+
+
+	reqn, exists := pb.cli2req[args.Me]
+	if exists {
+		if args.Reqn == reqn {
+			// dup Operation
+			return nil
+		} else {
+			// delete old answer
+			delete(pb.req2ans, reqn)
+			update(reqn)
+		}
+	} else {
+		// New Clerk
+		update(reqn)
+	}
 
 	return nil
 }
@@ -76,10 +144,14 @@ func (pb *PBServer) tick() {
 
 	// Your code here.
 	// learn latest view status
-	res, ok := pb.vs.Ping()
-	if ok {
-		pb.view = res.View
+	res, err := pb.vs.Ping(pb.view.Viewnum)
+	if err == nil {
+		pb.view = res
+		pb.primary = (pb.me == pb.view.Primary)
+	} else {
+		log.Fatal("vs conn abort!!!")
 	}
+	// XXX: manage transfer of state from primary to new backup.
 }
 
 // tell the server to shut itself down.
@@ -113,6 +185,9 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
 	// Your pb.* initializations here.
+	pb.data = make(map[string]string)
+	pb.cli2req = make(map[string]int64)
+	pb.req2ans = make(map[int64]string)
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(pb)

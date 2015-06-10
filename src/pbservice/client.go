@@ -12,8 +12,9 @@ import "math/big"
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
-	reqn int64 // request number
-	primary
+	reqn    int64 // request number
+	primary string
+	me      string
 }
 
 // this may come in handy.
@@ -29,6 +30,7 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
 	ck.reqn = 0
+	ck.me = me
 
 	return ck
 }
@@ -78,7 +80,7 @@ func (ck *Clerk) getPrimary() string {
 		time.Sleep(viewservice.PingInterval)
 		view, ok = ck.vs.Get()
 	}
-	vs.primary = view.Primary
+	ck.primary = view.Primary
 	return view.Primary
 }
 
@@ -96,13 +98,14 @@ func (ck *Clerk) Get(key string) string {
 	arg := new(GetArgs)
 	arg.Reqn = nrand()
 	arg.Key = key
+	arg.Me = ck.me
 	ok := call(ck.primary, "PBServer.Get", arg, reply)
 	for !ok {
 		// primary dead?
 		// XXX Handle timeout
 		primary := ck.getPrimary()
 		time.Sleep(viewservice.PingInterval)
-		ok = call(primary, "PBServer.Get", key, reply)
+		ok = call(primary, "PBServer.Get", arg, reply)
 	}
 	if reply.Err != "" {
 		// XXX
@@ -115,7 +118,6 @@ func (ck *Clerk) Get(key string) string {
 // send a Put or Append RPC
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-
 	// Your code here.
 	reply := new(PutAppendReply)
 	arg := new(PutAppendArgs)
@@ -123,13 +125,15 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	arg.Value = value
 	arg.Op = op
 	arg.Reqn = nrand()
+	arg.Me = ck.me
+	arg.Forward = false
 	ok := call(ck.primary, "PBServer.PutAppend", arg, reply)
 	for !ok {
 		// primary dead?
 		// XXX Handle timeout
 		primary := ck.getPrimary()
 		time.Sleep(viewservice.PingInterval)
-		ok = call(primary, "PBServer.PutAppend", key, reply)
+		ok = call(primary, "PBServer.PutAppend", arg, reply)
 	}
 }
 
