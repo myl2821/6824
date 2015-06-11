@@ -6,6 +6,11 @@ const (
 	ErrWrongServer = "ErrWrongServer"
 )
 
+type Ans struct {
+	Data string
+	Time int64
+}
+
 type Err string
 
 // Put or Append
@@ -14,7 +19,6 @@ type PutAppendArgs struct {
 	Value string
 	// You'll have to add definitions here.
 
-	Me string
 	// Req#
 	Reqn int64
 	// Operation
@@ -31,7 +35,6 @@ type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
 
-	Me string
 	// Req#
 	Reqn int64
 }
@@ -42,9 +45,13 @@ type GetReply struct {
 }
 
 // Your RPC definitions here.
+
+const ReqTTL = 30
+
 type LoadDBArgs struct {
 	Err  Err
 	Data map[string]string
+	Req  map[int64]Ans
 }
 
 type LoadDBReply struct {

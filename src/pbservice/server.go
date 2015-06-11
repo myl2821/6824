@@ -34,7 +34,7 @@ type PBServer struct {
 	//	cli2req map[string]int64
 
 	// map req# to its answer
-	req2ans map[int64]string
+	req2ans map[int64]Ans
 }
 
 // Forward instruction to backup
@@ -61,12 +61,12 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	pb.mu.Lock()
 	if pb.primary {
 		ans, exists := pb.req2ans[args.Reqn]
-		if exists {
-			reply.Value = ans
+		if exists && time.Now().Unix() - ans.Time < ReqTTL {
+			reply.Value = ans.Data
 		} else {
-			ans := pb.data[args.Key]
-			pb.req2ans[args.Reqn] = ans
-			reply.Value = ans
+			value := pb.data[args.Key]
+			pb.req2ans[args.Reqn] = Ans{value, time.Now().Unix()}
+			reply.Value = value
 		}
 	} else {
 		reply.Err = "Query backup"
@@ -85,6 +85,7 @@ func (pb *PBServer) LoadDB(args *LoadDBArgs, reply *LoadDBReply) error {
 		return nil
 	} else {
 		pb.data = args.Data
+		pb.req2ans = args.Req
 		return nil
 	}
 }
@@ -95,18 +96,17 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 
 	// Reject forward when needed
 	if pb.primary && args.Forward {
-		log.Println("Forward to Primary")
 		reply.Err = "Forward to Primary"
 		return nil
 	}
 
 	pb.mu.Lock()
-	_, exists := pb.req2ans[args.Reqn]
-	if exists {
+	ans, exists := pb.req2ans[args.Reqn]
+	if exists && time.Now().Unix() - ans.Time < ReqTTL {
 		pb.mu.Unlock()
 		return nil
 	} else {
-		pb.req2ans[args.Reqn] = args.Value
+		pb.req2ans[args.Reqn] = Ans{args.Value, time.Now().Unix()}
 		switch args.Op {
 		case "Put":
 			pb.data[args.Key] = args.Value
@@ -132,31 +132,39 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 func (pb *PBServer) tick() {
 
 	// Your code here.
-	// learn latest view status
-	res, err := pb.vs.Ping(pb.view.Viewnum)
 
-	if err == nil {
-		oldBackup := pb.view.Backup
-		pb.view = res
-		pb.primary = (pb.me == pb.view.Primary)
-		if (pb.view.Backup != oldBackup) && pb.primary {
-			// manage transfer of state from primary to new backup.
-			arg := new(LoadDBArgs)
-			arg.Data = pb.data
-			reply := new(LoadDBReply)
-			ok := call(pb.view.Backup, "PBServer.LoadDB", arg, reply)
-			for !ok {
-				time.Sleep(viewservice.PingInterval)
-				ok = call(pb.view.Backup, "PBServer.PutAppend", arg, reply)
-			}
-			if reply.Err != "" {
-				// XXX: handle error?
-			}
+	// TODO: do req2ans GC
+	start := time.Now().Unix()
+	for {
+		res, err := pb.vs.Ping(pb.view.Viewnum)
+		if time.Now().Unix() - start >= 1 {
+			// DeadPings exceeded, we are not Primary anymore
+			pb.primary = false
+			return
 		}
-	} else {
-		log.Fatal("vs conn abort!!!")
+		if err == nil {
+			oldBackup := pb.view.Backup
+			pb.view = res
+			pb.primary = (pb.me == pb.view.Primary)
+			if (pb.view.Backup != oldBackup) && pb.primary && pb.view.Backup != "" {
+				// manage transfer of state from primary to new backup.
+				arg := new(LoadDBArgs)
+				arg.Data = pb.data
+				arg.Req = pb.req2ans
+				reply := new(LoadDBReply)
+				ok := call(pb.view.Backup, "PBServer.LoadDB", arg, reply)
+				for !ok && pb.primary && pb.view.Backup != "" {
+					time.Sleep(viewservice.PingInterval)
+					ok = call(pb.view.Backup, "PBServer.PutAppend", arg, reply)
+				}
+				if reply.Err != "" {
+					// XXX: handle error?
+				}
+			}
+			return
+		}
+		time.Sleep(viewservice.PingInterval)
 	}
-
 }
 
 // tell the server to shut itself down.
@@ -191,7 +199,7 @@ func StartServer(vshost string, me string) *PBServer {
 	// Your pb.* initializations here.
 	pb.data = make(map[string]string)
 	//	pb.cli2req = make(map[string]int64)
-	pb.req2ans = make(map[int64]string)
+	pb.req2ans = make(map[int64]Ans)
 
 	rpcs := rpc.NewServer()
 	rpcs.Register(pb)
