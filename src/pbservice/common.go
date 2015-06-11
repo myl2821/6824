@@ -10,15 +10,15 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key    string
-	Value  string
+	Key   string
+	Value string
 	// You'll have to add definitions here.
 
-	Me     string
+	Me string
 	// Req#
-	Reqn   int64
+	Reqn int64
 	// Operation
-	Op     string
+	Op string
 	// Forwarded?
 	Forward bool
 }
@@ -28,12 +28,12 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key     string
+	Key string
 	// You'll have to add definitions here.
 
-	Me     string
+	Me string
 	// Req#
-	Reqn    int64
+	Reqn int64
 }
 
 type GetReply struct {
@@ -41,5 +41,12 @@ type GetReply struct {
 	Value string
 }
 
-
 // Your RPC definitions here.
+type LoadDBArgs struct {
+	Err  Err
+	Data map[string]string
+}
+
+type LoadDBReply struct {
+	Err Err
+}

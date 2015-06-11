@@ -12,7 +12,6 @@ import "os"
 import "syscall"
 import "math/rand"
 
-
 type PBServer struct {
 	mu         sync.Mutex
 	l          net.Listener
@@ -23,29 +22,31 @@ type PBServer struct {
 	// Your declarations here.
 
 	// K-V pair memcache
-	data       map[string]string
+	data map[string]string
 
 	// latest View
-	view       viewservice.View
+	view viewservice.View
 
 	// I am primary?
-	primary	   bool
+	primary bool
 
 	// Map client to its latest req#
-	cli2req    map[string]int64
+	//	cli2req map[string]int64
 
 	// map req# to its answer
-	req2ans    map[int64]string
-
+	req2ans map[int64]string
 }
 
 // Forward instruction to backup
-func (pb *PBServer) Forward(serv string, arg *PutAppendArgs, reply *PutAppendReply) error {
+func (pb *PBServer) Forward(arg *PutAppendArgs, reply *PutAppendReply) error {
 	arg.Forward = true
-	ok := call(serv, "PBServer.PutAppend", arg, reply)
+	ok := call(pb.view.Backup, "PBServer.PutAppend", arg, reply)
 	for !ok {
 		time.Sleep(viewservice.PingInterval)
-		ok = call(serv, "PBServer.PutAppend", arg, reply)
+		if pb.view.Backup == "" {
+			return nil
+		}
+		ok = call(pb.view.Backup, "PBServer.PutAppend", arg, reply)
 	}
 	if reply.Err != "" {
 		// XXX being rejected
@@ -57,34 +58,20 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
 
-	getAns := func(reqn int64) {
-		pb.cli2req[args.Me] = reqn
-		ans := pb.data[args.Key]
-		log.Println(args.Key)
-		pb.req2ans[reqn] = ans
-		reply.Value = ans
-	}
-
-	// Don't forward Get option
+	pb.mu.Lock()
 	if pb.primary {
-		reqn, exists := pb.cli2req[args.Me]
+		ans, exists := pb.req2ans[args.Reqn]
 		if exists {
-			if args.Reqn == reqn {
-				// dup Operation
-				reply.Value = pb.req2ans[reqn]
-			} else {
-				// delete old answer
-				delete(pb.req2ans, reqn)
-				getAns(reqn)
-			}
+			reply.Value = ans
 		} else {
-			// New Clerk
-			getAns(reqn)
+			ans := pb.data[args.Key]
+			pb.req2ans[args.Reqn] = ans
+			reply.Value = ans
 		}
 	} else {
-		log.Println("x")
 		reply.Err = "Query backup"
 	}
+	pb.mu.Unlock()
 
 	// XXX Map new answer
 	// XXX Unmap old answer
@@ -92,15 +79,34 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
+func (pb *PBServer) LoadDB(args *LoadDBArgs, reply *LoadDBReply) error {
+	if pb.primary {
+		reply.Err = "Send DB to primary"
+		return nil
+	} else {
+		pb.data = args.Data
+		return nil
+	}
+}
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 
 	// Your code here.
 
-	// XXX Reject forward when needed
+	// Reject forward when needed
+	if pb.primary && args.Forward {
+		log.Println("Forward to Primary")
+		reply.Err = "Forward to Primary"
+		return nil
+	}
 
-	update := func(reqn int64) {
-		pb.cli2req[args.Me] = reqn
+	pb.mu.Lock()
+	_, exists := pb.req2ans[args.Reqn]
+	if exists {
+		pb.mu.Unlock()
+		return nil
+	} else {
+		pb.req2ans[args.Reqn] = args.Value
 		switch args.Op {
 		case "Put":
 			pb.data[args.Key] = args.Value
@@ -108,31 +114,14 @@ func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error 
 			pb.data[args.Key] += args.Value
 		}
 
-		pb.req2ans[reqn] = ""
 		if pb.primary && pb.view.Backup != "" {
-			pb.Forward(pb.view.Backup, args ,reply)
+			pb.Forward(args, reply)
 		}
 	}
-
-
-	reqn, exists := pb.cli2req[args.Me]
-	if exists {
-		if args.Reqn == reqn {
-			// dup Operation
-			return nil
-		} else {
-			// delete old answer
-			delete(pb.req2ans, reqn)
-			update(reqn)
-		}
-	} else {
-		// New Clerk
-		update(reqn)
-	}
+	pb.mu.Unlock()
 
 	return nil
 }
-
 
 //
 // ping the viewserver periodically.
@@ -145,13 +134,29 @@ func (pb *PBServer) tick() {
 	// Your code here.
 	// learn latest view status
 	res, err := pb.vs.Ping(pb.view.Viewnum)
+
 	if err == nil {
+		oldBackup := pb.view.Backup
 		pb.view = res
 		pb.primary = (pb.me == pb.view.Primary)
+		if (pb.view.Backup != oldBackup) && pb.primary {
+			// manage transfer of state from primary to new backup.
+			arg := new(LoadDBArgs)
+			arg.Data = pb.data
+			reply := new(LoadDBReply)
+			ok := call(pb.view.Backup, "PBServer.LoadDB", arg, reply)
+			for !ok {
+				time.Sleep(viewservice.PingInterval)
+				ok = call(pb.view.Backup, "PBServer.PutAppend", arg, reply)
+			}
+			if reply.Err != "" {
+				// XXX: handle error?
+			}
+		}
 	} else {
 		log.Fatal("vs conn abort!!!")
 	}
-	// XXX: manage transfer of state from primary to new backup.
+
 }
 
 // tell the server to shut itself down.
@@ -179,14 +184,13 @@ func (pb *PBServer) isunreliable() bool {
 	return atomic.LoadInt32(&pb.unreliable) != 0
 }
 
-
 func StartServer(vshost string, me string) *PBServer {
 	pb := new(PBServer)
 	pb.me = me
 	pb.vs = viewservice.MakeClerk(me, vshost)
 	// Your pb.* initializations here.
 	pb.data = make(map[string]string)
-	pb.cli2req = make(map[string]int64)
+	//	pb.cli2req = make(map[string]int64)
 	pb.req2ans = make(map[int64]string)
 
 	rpcs := rpc.NewServer()
