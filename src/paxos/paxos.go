@@ -31,7 +31,6 @@ import "sync/atomic"
 import "fmt"
 import "math/rand"
 
-
 // px.Status() return values, indicating
 // whether an agreement has been decided,
 // or Paxos has not yet reached agreement,
@@ -53,8 +52,20 @@ type Paxos struct {
 	peers      []string
 	me         int // index into peers[]
 
-
 	// Your data here.
+	npeers       int
+	n_p          int
+	n_a          int
+	agreement    []interface{}
+	startChannel chan bool
+}
+
+// suppose we don't need to record n
+// because we know what n is
+type PaxosReply struct {
+	Result bool
+	N_a    int
+	V_a    interface{}
 }
 
 //
@@ -93,6 +104,20 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 	return false
 }
 
+func (px *Paxos) Prepare(seq int, reply *PaxosReply) error {
+	// XXX: not implemented
+	return nil
+}
+
+func (px *Paxos) Accept(seq int, value interface{}, reply *PaxosReply) error {
+	// XXX: not implemented
+	return nil
+}
+
+func (px *Paxos) Decided(seq int, value interface{}, reply *PaxosReply) error {
+	// XXX: not implemented
+	return nil
+}
 
 //
 // the application wants paxos to start agreement on
@@ -102,7 +127,20 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 // is reached.
 //
 func (px *Paxos) Start(seq int, v interface{}) {
-	// Your code here.
+	go func() {
+		for _, pax := range px.peers {
+			go func(pax string) {
+				log.Println(pax)
+				var reply PaxosReply
+				call(pax, "Paxos.Prepare", seq, &reply)
+				px.startChannel <- true
+			}(pax)
+		}
+
+		for i := 0; i < px.npeers; i++ {
+			<-px.startChannel
+		}
+	}()
 }
 
 //
@@ -167,10 +205,10 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
+
+	//	return Decided, val
 	return Pending, nil
 }
-
-
 
 //
 // tell the peer to shut itself down.
@@ -214,8 +252,12 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.peers = peers
 	px.me = me
 
-
 	// Your initialization code here.
+	px.npeers = len(peers)
+	px.n_p = -1
+	px.n_a = -1
+	px.startChannel = make(chan bool)
+	// over.
 
 	if rpcs != nil {
 		// caller will create socket &c
@@ -268,6 +310,7 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 		}()
 	}
 
-
 	return px
 }
+
+// Custom subroutines
