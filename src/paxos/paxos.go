@@ -63,7 +63,7 @@ type Paxos struct {
 // because we know what n is
 type PaxosReply struct {
 	Result bool
-	N_a    int
+	N_a    int64
 	V_a    interface{}
 }
 
@@ -118,23 +118,117 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-func (px *Paxos) Prepare(seq int, n int, reply *PaxosReply) error {
+func (px *Paxos) Prepare(arg PaxosArg, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
 }
 
-func (px *Paxos) Accept(seq int, n int, value interface{}, reply *PaxosReply) error {
+func (px *Paxos) Accept(arg PaxosArg, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
 }
 
-func (px *Paxos) Decide(seq int, n int, value interface{}, reply *PaxosReply) error {
+func (px *Paxos) Decided(PaxosArg, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
+}
+
+func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}) {
+	ch := make(chan PaxosReply, px.npeers)
+	for _, pax := range px.peers {
+		go func(pax string) {
+			var reply PaxosReply
+			arg := PaxosArg{Seq: seq, N: n, V: v}
+			ok := call(pax, "Paxos.Prepare", arg, &reply)
+			if ok == false {
+				// cannot connect to peer, regard it as reject
+				reply.Result = false
+			}
+			ch <- reply
+		}(pax)
+	}
+
+	var n_a int64 = -1
+	var v_a interface{} = nil
+	consensus := false
+	nagree := 0
+	for i := 0; i < px.npeers; i++ {
+		reply := <-ch
+		if reply.Result == true && consensus == false {
+			nagree++
+			if reply.N_a > n_a {
+				n_a = reply.N_a
+				v_a = reply.V_a
+			}
+			if nagree > px.npeers/2 {
+				consensus = true
+				if n_a == -1 {
+					// no proposal seen from others
+					v_a = v
+				}
+			}
+		}
+	}
+	if consensus == false {
+		v_a = nil
+	}
+	return consensus, v_a
+}
+
+func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
+	ch := make(chan PaxosReply, px.npeers)
+	for _, pax := range px.peers {
+		go func(pax string) {
+			var reply PaxosReply
+			arg := PaxosArg{Seq: seq, N: n, V: v}
+			ok := call(pax, "Paxos.Agree", arg, &reply)
+			if ok == false {
+				// cannot connect to peer, regard it as reject
+				reply.Result = false
+			}
+			ch <- reply
+		}(pax)
+	}
+
+	consensus := false
+	nagree := 0
+	for i := 0; i < px.npeers; i++ {
+		reply := <-ch
+		if reply.Result == true && consensus == false {
+			nagree++
+			if nagree > px.npeers/2 {
+				consensus = true
+			}
+		}
+	}
+	return consensus
+}
+
+func (px *Paxos) SendDecided(seq int, v interface{}) {
+	for _, pax := range px.peers {
+		go func(pax string) {
+			var reply PaxosReply
+			arg := PaxosArg{seq, -1, v, px.done[px.me], px.me}
+			_ = call(pax, "Paxos.Agree", arg, &reply)
+		}(pax)
+	}
 }
 
 func (px *Paxos) Proposer(seq int, v interface{}) {
-
+	for {
+		// just use UNIX timestamp as proposal number
+		n := time.Now().Unix()
+		prepare_ok, v_a := px.SendPrepare(seq, n, v)
+		if prepare_ok {
+			accept_ok := px.SendAccept(seq, n, v_a)
+			if accept_ok {
+				px.SendDecided(seq, v_a)
+				break
+			}
+		}
+		//XXX: should raise fail after some times
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 //
@@ -148,58 +242,8 @@ func (px *Paxos) Start(seq int, v interface{}) {
 	go func() {
 		if seq >= px.Min() {
 			px.Proposer(seq, v)
-		} else {
-			// Reject
 		}
 	}()
-	/*
-		go func() {
-			for _, pax := range px.peers {
-				go func(pax string) {
-					var reply PaxosReply
-					ok := call(pax, "Paxos.Prepare", seq, &reply)
-					if ok == false {
-						// cannot connect to peer, regard it as reject
-						reply.Result = false
-					}
-					px.prepareChannel <- reply
-				}(pax)
-			}
-
-			m := make(map[int]int)
-			consensus := false
-			for i := 0; i < px.npeers; i++ {
-				reply := <-px.prepareChannel
-				px.mu.Lock()
-				if reply.Result == true && consensus == false {
-					m[reply.N_a]++
-					if m[reply.N_a] > px.npeers/2 {
-						/////////////////////
-						go func(proposal PaxosReply) {
-
-							for _, pax := range px.peers {
-								go func(pax string) {
-									var reply PaxosReply
-									ok := call(pax, "Paxos.Accept", seq, &reply)
-									if ok == false {
-										// cannot connect to peer, regard it as reject
-										reply.Result = false
-									}
-									px.startChannel <- reply
-								}(pax)
-							}
-
-						}(reply)
-						/////////////////
-						consensus = true
-					}
-					px.mu.Unlock()
-				} else {
-					px.mu.Unlock()
-				}
-			}
-		}()
-	*/
 }
 
 //
