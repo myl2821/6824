@@ -23,6 +23,7 @@ package paxos
 import "net"
 import "net/rpc"
 import "log"
+import "time"
 
 import "os"
 import "syscall"
@@ -53,11 +54,9 @@ type Paxos struct {
 	me         int // index into peers[]
 
 	// Your data here.
-	npeers       int
-	n_p          int
-	n_a          int
-	agreement    []interface{}
-	startChannel chan bool
+	npeers int
+	inst   map[int]PaxosInstance
+	done   []int
 }
 
 // suppose we don't need to record n
@@ -66,6 +65,21 @@ type PaxosReply struct {
 	Result bool
 	N_a    int
 	V_a    interface{}
+}
+
+type PaxosArg struct {
+	Seq  int
+	N    int64
+	V    interface{}
+	Done int
+	Me   int
+}
+
+type PaxosInstance struct {
+	n_p  int
+	n_a  int
+	v_a  interface{}
+	fate Fate
 }
 
 //
@@ -104,19 +118,23 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-func (px *Paxos) Prepare(seq int, reply *PaxosReply) error {
+func (px *Paxos) Prepare(seq int, n int, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
 }
 
-func (px *Paxos) Accept(seq int, value interface{}, reply *PaxosReply) error {
+func (px *Paxos) Accept(seq int, n int, value interface{}, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
 }
 
-func (px *Paxos) Decided(seq int, value interface{}, reply *PaxosReply) error {
+func (px *Paxos) Decide(seq int, n int, value interface{}, reply *PaxosReply) error {
 	// XXX: not implemented
 	return nil
+}
+
+func (px *Paxos) Proposer(seq int, v interface{}) {
+
 }
 
 //
@@ -128,19 +146,60 @@ func (px *Paxos) Decided(seq int, value interface{}, reply *PaxosReply) error {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
 	go func() {
-		for _, pax := range px.peers {
-			go func(pax string) {
-				log.Println(pax)
-				var reply PaxosReply
-				call(pax, "Paxos.Prepare", seq, &reply)
-				px.startChannel <- true
-			}(pax)
-		}
-
-		for i := 0; i < px.npeers; i++ {
-			<-px.startChannel
+		if seq >= px.Min() {
+			px.Proposer(seq, v)
+		} else {
+			// Reject
 		}
 	}()
+	/*
+		go func() {
+			for _, pax := range px.peers {
+				go func(pax string) {
+					var reply PaxosReply
+					ok := call(pax, "Paxos.Prepare", seq, &reply)
+					if ok == false {
+						// cannot connect to peer, regard it as reject
+						reply.Result = false
+					}
+					px.prepareChannel <- reply
+				}(pax)
+			}
+
+			m := make(map[int]int)
+			consensus := false
+			for i := 0; i < px.npeers; i++ {
+				reply := <-px.prepareChannel
+				px.mu.Lock()
+				if reply.Result == true && consensus == false {
+					m[reply.N_a]++
+					if m[reply.N_a] > px.npeers/2 {
+						/////////////////////
+						go func(proposal PaxosReply) {
+
+							for _, pax := range px.peers {
+								go func(pax string) {
+									var reply PaxosReply
+									ok := call(pax, "Paxos.Accept", seq, &reply)
+									if ok == false {
+										// cannot connect to peer, regard it as reject
+										reply.Result = false
+									}
+									px.startChannel <- reply
+								}(pax)
+							}
+
+						}(reply)
+						/////////////////
+						consensus = true
+					}
+					px.mu.Unlock()
+				} else {
+					px.mu.Unlock()
+				}
+			}
+		}()
+	*/
 }
 
 //
@@ -160,7 +219,16 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
 	// Your code here.
-	return 0
+	max := 0
+	for k, _ := range px.inst {
+		if k > max {
+			max = k
+		}
+	}
+	if px.done[px.me] > max {
+		max = px.done[px.me]
+	}
+	return max
 }
 
 //
@@ -193,7 +261,24 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
 	// You code here.
-	return 0
+	min := px.done[px.me]
+	for _, v := range px.done {
+		if v < min {
+			min = v
+		}
+	}
+
+	// Paxos is required to have forgotten all information
+	// about any instances it knows that are < Min().
+	// The point is to free up memory in long-running
+	// Paxos-based servers.
+	for k, v := range px.inst {
+		if k <= min && v.fate == Decided {
+			delete(px.inst, k)
+		}
+	}
+
+	return min + 1
 }
 
 //
@@ -254,9 +339,11 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
 	// Your initialization code here.
 	px.npeers = len(peers)
-	px.n_p = -1
-	px.n_a = -1
-	px.startChannel = make(chan bool)
+	px.inst = make(map[int]PaxosInstance)
+	px.done = make([]int, px.npeers)
+	for i, _ := range peers {
+		px.done[i] = -1
+	}
 	// over.
 
 	if rpcs != nil {
