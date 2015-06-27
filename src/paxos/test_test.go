@@ -138,6 +138,7 @@ func TestBasic(t *testing.T) {
 	for i := 0; i < npaxos; i++ {
 		pxa[i].Start(1, 77)
 	}
+
 	waitn(t, pxa, 1, npaxos)
 
 	fmt.Printf("  ... Passed\n")

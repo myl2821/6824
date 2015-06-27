@@ -54,9 +54,10 @@ type Paxos struct {
 	me         int // index into peers[]
 
 	// Your data here.
-	npeers int
-	inst   map[int]PaxosInstance
-	done   []int
+	npeers   int
+	inst     map[int]PaxosInstance
+	done     []int
+	doneLock sync.Mutex
 }
 
 // suppose we don't need to record n
@@ -76,8 +77,8 @@ type PaxosArg struct {
 }
 
 type PaxosInstance struct {
-	n_p  int
-	n_a  int
+	n_p  int64
+	n_a  int64
 	v_a  interface{}
 	fate Fate
 }
@@ -119,30 +120,83 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 }
 
 func (px *Paxos) Prepare(arg PaxosArg, reply *PaxosReply) error {
-	// XXX: not implemented
+	px.mu.Lock()
+	inst, exist := px.inst[arg.Seq]
+	if exist {
+		if arg.N > inst.n_p {
+			inst.n_p = arg.N
+			px.inst[arg.Seq] = inst
+			reply.Result = true
+			reply.N_a = inst.n_a
+			reply.V_a = inst.v_a
+		} else {
+			// reject
+			reply.Result = false
+		}
+	} else {
+		// new instance seen
+		px.inst[arg.Seq] = PaxosInstance{arg.N, -1, nil, Pending}
+		reply.Result = true
+		reply.N_a = -1
+		reply.V_a = nil
+	}
+	px.mu.Unlock()
 	return nil
 }
 
 func (px *Paxos) Accept(arg PaxosArg, reply *PaxosReply) error {
-	// XXX: not implemented
+	px.mu.Lock()
+	inst, exist := px.inst[arg.Seq]
+	if exist {
+		if arg.N >= inst.n_p {
+			inst.n_p = arg.N
+			inst.n_a = arg.N
+			inst.v_a = arg.V
+			px.inst[arg.Seq] = inst
+			reply.Result = true
+		} else {
+			// reject
+			reply.Result = false
+		}
+	} else {
+		// new instance seen
+		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Pending}
+		reply.Result = true
+	}
+	px.mu.Unlock()
 	return nil
 }
 
-func (px *Paxos) Decided(PaxosArg, reply *PaxosReply) error {
-	// XXX: not implemented
+func (px *Paxos) Decided(arg PaxosArg, reply *PaxosReply) error {
+	px.mu.Lock()
+	inst, exist := px.inst[arg.Seq]
+	px.done[arg.Me] = arg.Done
+	if exist && inst.fate == Pending {
+		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Decided}
+		px.done[arg.Me] = arg.Done
+	} else {
+		// new instance seen
+		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Decided}
+	}
+	px.UpdateDone()
+	px.mu.Unlock()
 	return nil
 }
 
 func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}) {
 	ch := make(chan PaxosReply, px.npeers)
-	for _, pax := range px.peers {
+	for i, pax := range px.peers {
 		go func(pax string) {
 			var reply PaxosReply
 			arg := PaxosArg{Seq: seq, N: n, V: v}
-			ok := call(pax, "Paxos.Prepare", arg, &reply)
-			if ok == false {
-				// cannot connect to peer, regard it as reject
-				reply.Result = false
+			if i == px.me {
+				_ = px.Prepare(arg, &reply)
+			} else {
+				ok := call(pax, "Paxos.Prepare", arg, &reply)
+				if ok == false {
+					// cannot connect to peer, regard it as reject
+					reply.Result = false
+				}
 			}
 			ch <- reply
 		}(pax)
@@ -152,6 +206,7 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 	var v_a interface{} = nil
 	consensus := false
 	nagree := 0
+
 	for i := 0; i < px.npeers; i++ {
 		reply := <-ch
 		if reply.Result == true && consensus == false {
@@ -169,27 +224,46 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 			}
 		}
 	}
-	if consensus == false {
-		v_a = nil
-	}
 	return consensus, v_a
+}
+
+func (px *Paxos) UpdateDone() {
+	px.doneLock.Lock()
+	done := px.done[px.me] + 1
+	for {
+		inst, exist := px.inst[done]
+		if exist {
+			if inst.fate == Decided {
+				px.done[px.me] = done
+				done++
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+	px.doneLock.Unlock()
 }
 
 func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
 	ch := make(chan PaxosReply, px.npeers)
-	for _, pax := range px.peers {
+	for i, pax := range px.peers {
 		go func(pax string) {
 			var reply PaxosReply
 			arg := PaxosArg{Seq: seq, N: n, V: v}
-			ok := call(pax, "Paxos.Agree", arg, &reply)
-			if ok == false {
-				// cannot connect to peer, regard it as reject
-				reply.Result = false
+			if i == px.me {
+				px.Accept(arg, &reply)
+			} else {
+				ok := call(pax, "Paxos.Accept", arg, &reply)
+				if ok == false {
+					// cannot connect to peer, regard it as reject
+					reply.Result = false
+				}
 			}
 			ch <- reply
 		}(pax)
 	}
-
 	consensus := false
 	nagree := 0
 	for i := 0; i < px.npeers; i++ {
@@ -201,21 +275,30 @@ func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
 			}
 		}
 	}
+
 	return consensus
 }
 
 func (px *Paxos) SendDecided(seq int, v interface{}) {
-	for _, pax := range px.peers {
+	px.UpdateDone()
+	for i, pax := range px.peers {
 		go func(pax string) {
 			var reply PaxosReply
 			arg := PaxosArg{seq, -1, v, px.done[px.me], px.me}
-			_ = call(pax, "Paxos.Agree", arg, &reply)
+			if i == px.me {
+				px.Decided(arg, &reply)
+			} else {
+				_ = call(pax, "Paxos.Decided", arg, &reply)
+			}
 		}(pax)
 	}
 }
 
 func (px *Paxos) Proposer(seq int, v interface{}) {
 	for {
+		if px.done[px.me] >= seq {
+			break
+		}
 		// just use UNIX timestamp as proposal number
 		n := time.Now().Unix()
 		prepare_ok, v_a := px.SendPrepare(seq, n, v)
@@ -334,9 +417,14 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
-
-	//	return Decided, val
-	return Pending, nil
+	px.mu.Lock()
+	inst, exist := px.inst[seq]
+	px.mu.Unlock()
+	if exist {
+		return inst.fate, inst.v_a
+	} else {
+		return Pending, nil
+	}
 }
 
 //
