@@ -360,6 +360,13 @@ func (px *Paxos) Start(seq int, v interface{}) {
 	}()
 }
 
+func (px *Paxos) DoneAcceptor(arg PaxosArg, reply *PaxosReply) error {
+	px.doneLock.Lock()
+	px.done[arg.Me] = arg.Done
+	px.doneLock.Unlock()
+	return nil
+}
+
 //
 // the application on this machine is done with
 // all instances <= seq.
@@ -368,6 +375,17 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
 	// Your code here.
+	px.mu.Lock()
+	var reply PaxosReply
+	arg := PaxosArg{seq, -1, nil, seq, px.me}
+	for i, pax := range px.peers {
+		if i != px.me {
+			_ = call(pax, "Paxos.DoneAcceptor", arg, &reply)
+		} else {
+			px.done[px.me] = seq
+		}
+	}
+	px.mu.Unlock()
 }
 
 //
@@ -383,6 +401,7 @@ func (px *Paxos) Max() int {
 			max = k
 		}
 	}
+
 	if px.done[px.me] > max {
 		max = px.done[px.me]
 	}
@@ -454,6 +473,9 @@ func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	if exist {
 		return inst.fate, inst.v_a
 	} else {
+		if seq < px.Min() {
+			return Forgotten, nil
+		}
 		return Pending, nil
 	}
 }
