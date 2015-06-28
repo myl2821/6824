@@ -64,6 +64,7 @@ type Paxos struct {
 // because we know what n is
 type PaxosReply struct {
 	Result bool
+	Status Fate
 	N_a    int64
 	V_a    interface{}
 }
@@ -123,19 +124,30 @@ func (px *Paxos) Prepare(arg PaxosArg, reply *PaxosReply) error {
 	px.mu.Lock()
 	inst, exist := px.inst[arg.Seq]
 	if exist {
+		if inst.fate == Decided {
+			reply.Result = false
+			reply.Status = Decided
+			reply.N_a = inst.n_a
+			reply.V_a = inst.v_a
+			px.mu.Unlock()
+			return nil
+		}
 		if arg.N > inst.n_p {
 			inst.n_p = arg.N
 			px.inst[arg.Seq] = inst
 			reply.Result = true
 			reply.N_a = inst.n_a
 			reply.V_a = inst.v_a
+			reply.Status = inst.fate
 		} else {
 			// reject
 			reply.Result = false
+			reply.Status = inst.fate
 		}
 	} else {
 		// new instance seen
 		px.inst[arg.Seq] = PaxosInstance{arg.N, -1, nil, Pending}
+		reply.Status = Pending
 		reply.Result = true
 		reply.N_a = -1
 		reply.V_a = nil
@@ -148,6 +160,12 @@ func (px *Paxos) Accept(arg PaxosArg, reply *PaxosReply) error {
 	px.mu.Lock()
 	inst, exist := px.inst[arg.Seq]
 	if exist {
+		if inst.fate == Decided {
+			reply.Result = false
+			reply.Status = Decided
+			reply.N_a = inst.n_a
+			reply.V_a = inst.v_a
+		}
 		if arg.N >= inst.n_p {
 			inst.n_p = arg.N
 			inst.n_a = arg.N
@@ -157,11 +175,13 @@ func (px *Paxos) Accept(arg PaxosArg, reply *PaxosReply) error {
 		} else {
 			// reject
 			reply.Result = false
+			reply.Status = inst.fate
 		}
 	} else {
 		// new instance seen
 		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Pending}
 		reply.Result = true
+		reply.Status = inst.fate
 	}
 	px.mu.Unlock()
 	return nil
@@ -196,6 +216,7 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 				if ok == false {
 					// cannot connect to peer, regard it as reject
 					reply.Result = false
+					reply.Status = Pending
 				}
 			}
 			ch <- reply
@@ -222,6 +243,11 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 					v_a = v
 				}
 			}
+		} else if reply.Result == false && reply.Status == Decided {
+			arg := PaxosArg{seq, reply.N_a, reply.V_a, px.done[px.me], px.me}
+			var _reply PaxosReply
+			px.Decided(arg, &_reply)
+			return false, nil
 		}
 	}
 	return consensus, v_a
@@ -273,6 +299,11 @@ func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
 			if nagree > px.npeers/2 {
 				consensus = true
 			}
+		} else if reply.Result == false && reply.Status == Decided {
+			arg := PaxosArg{seq, reply.N_a, reply.V_a, px.done[px.me], px.me}
+			var _reply PaxosReply
+			px.Decided(arg, &_reply)
+			return false
 		}
 	}
 
