@@ -189,22 +189,18 @@ func (px *Paxos) Accept(arg PaxosArg, reply *PaxosReply) error {
 
 func (px *Paxos) Decided(arg PaxosArg, reply *PaxosReply) error {
 	px.mu.Lock()
-	inst, exist := px.inst[arg.Seq]
+	defer px.mu.Unlock()
+	fate, _ := px.Status(arg.Seq)
 	px.done[arg.Me] = arg.Done
-	if exist && inst.fate == Pending {
-		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Decided}
-		px.done[arg.Me] = arg.Done
-	} else {
-		// new instance seen
+	if fate == Pending {
 		px.inst[arg.Seq] = PaxosInstance{arg.N, arg.N, arg.V, Decided}
 	}
 	px.UpdateDone()
-	px.mu.Unlock()
 	return nil
 }
 
 func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}) {
-	ch := make(chan PaxosReply, px.npeers)
+	ch := make(chan PaxosReply)
 	for i, pax := range px.peers {
 		go func(pax string) {
 			var reply PaxosReply
@@ -214,7 +210,14 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 			} else {
 				ok := call(pax, "Paxos.Prepare", arg, &reply)
 				if ok == false {
-					// cannot connect to peer, regard it as reject
+					for i := 0; i < 30; i++ {
+						time.Sleep(10 * time.Millisecond)
+						ok = call(pax, "Paxos.Prepare", arg, &reply)
+						if ok {
+							ch <- reply
+							return
+						}
+					}
 					reply.Result = false
 					reply.Status = Pending
 				}
@@ -244,9 +247,7 @@ func (px *Paxos) SendPrepare(seq int, n int64, v interface{}) (bool, interface{}
 				}
 			}
 		} else if reply.Result == false && reply.Status == Decided {
-			arg := PaxosArg{seq, reply.N_a, reply.V_a, px.done[px.me], px.me}
-			var _reply PaxosReply
-			px.Decided(arg, &_reply)
+			px.SendDecided(seq, reply.V_a)
 			return false, nil
 		}
 	}
@@ -273,7 +274,7 @@ func (px *Paxos) UpdateDone() {
 }
 
 func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
-	ch := make(chan PaxosReply, px.npeers)
+	ch := make(chan PaxosReply)
 	for i, pax := range px.peers {
 		go func(pax string) {
 			var reply PaxosReply
@@ -283,7 +284,14 @@ func (px *Paxos) SendAccept(seq int, n int64, v interface{}) bool {
 			} else {
 				ok := call(pax, "Paxos.Accept", arg, &reply)
 				if ok == false {
-					// cannot connect to peer, regard it as reject
+					for i := 0; i < 30; i++ {
+						time.Sleep(10 * time.Millisecond)
+						ok = call(pax, "Paxos.Accept", arg, &reply)
+						if ok {
+							ch <- reply
+							return
+						}
+					}
 					reply.Result = false
 				}
 			}
@@ -319,7 +327,16 @@ func (px *Paxos) SendDecided(seq int, v interface{}) {
 			if i == px.me {
 				px.Decided(arg, &reply)
 			} else {
-				_ = call(pax, "Paxos.Decided", arg, &reply)
+				ok := call(pax, "Paxos.Decided", arg, &reply)
+				if !ok {
+					for i := 0; i < 30; i++ {
+						time.Sleep(10 * time.Millisecond)
+						ok = call(pax, "Paxos.Decided", arg, &reply)
+						if ok {
+							break
+						}
+					}
+				}
 			}
 		}(pax)
 	}
@@ -327,7 +344,8 @@ func (px *Paxos) SendDecided(seq int, v interface{}) {
 
 func (px *Paxos) Proposer(seq int, v interface{}) {
 	for {
-		if px.done[px.me] >= seq {
+		fate, _ := px.Status(seq)
+		if fate != Pending {
 			break
 		}
 		// just use UNIX timestamp as proposal number
@@ -354,7 +372,7 @@ func (px *Paxos) Proposer(seq int, v interface{}) {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
 	go func() {
-		if seq >= px.Min() {
+		if seq >= px.queryMin() {
 			px.Proposer(seq, v)
 		}
 	}()
@@ -458,6 +476,16 @@ func (px *Paxos) Min() int {
 	return min + 1
 }
 
+func (px *Paxos) queryMin() int {
+	min := px.done[px.me]
+	for _, v := range px.done {
+		if v < min {
+			min = v
+		}
+	}
+	return min
+}
+
 //
 // the application wants to know whether this
 // peer thinks an instance has been decided,
@@ -467,13 +495,13 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
-	px.mu.Lock()
+	px.doneLock.Lock()
 	inst, exist := px.inst[seq]
-	px.mu.Unlock()
+	px.doneLock.Unlock()
 	if exist {
 		return inst.fate, inst.v_a
 	} else {
-		if seq < px.Min() {
+		if seq < px.queryMin() {
 			return Forgotten, nil
 		}
 		return Pending, nil
